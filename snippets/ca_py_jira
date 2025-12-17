@@ -1,0 +1,398 @@
+# -----------------------------------------------------------------------------
+# NOTE
+# -----
+# The script automates the processing of Corporate Action Jira tickets by:
+# fetching relevant Jira issues based on time and exchange
+# extracting old/new product information from ticket fields
+# checking for open trading orders
+# executing database stored procedures to update or deactivate products
+# running follow-up trading system commands when needed
+# commenting on and transitioning Jira tickets automatically
+# In short: it links Jira → database → trading systems to handle Corporate Actions
+# with minimal manual intervention.
+# -----------------------------------------------------------------------------
+
+# Standard library imports
+import sys
+import os
+import re
+import logging
+import datetime as dt
+
+# Third‑party imports
+sys.path.insert(0, '/Daniele/code/python/env/lib64/site-packages/')
+from mysql import connector
+
+sys.path.insert(0, '/Daniele/code/python/env/lib/site-packages/')
+from jira import JIRA
+
+# Internal shared utilities
+sys.path.insert(0, os.path.expanduser('~/Daniele/code/python/shared/utils/'))
+import adm_py as ac
+
+# -----------------------------------------------------------------------------
+# Utility functions
+# -----------------------------------------------------------------------------
+
+def normalize_classification(classification):
+    """Normalize CA classification values to internal naming conventions."""
+    mapping = {
+        "rights issue": "rights",
+        "rights issues": "rights",
+        "reverse stock splits": "reverse split",
+        "stock split": "split",
+        "stock splits": "split",
+        "change of listing": "exchange change",
+        "change of isin": "isin change",
+        "spin-off": "spinoff",
+    }
+    return mapping.get(classification.lower(), classification.lower())
+
+
+def has_open_orders(product_id):
+    """Check if a product has open orders and prepare TS cleanup commands."""
+    global open_orders_cmd
+
+    response = ac.ac_command(
+        ts_host, ts_port, ts_credentials[0], ts_credentials[1],
+        f"command pid {product_id}"
+    )
+
+    order_ids = re.findall(ORDER_ID_PATTERN, response, re.IGNORECASE)
+    open_orders_cmd = "\n".join(f"command sid {oid}" for oid in order_ids)
+
+    return bool(order_ids)
+
+# -----------------------------------------------------------------------------
+# Runtime state & file tracking
+# -----------------------------------------------------------------------------
+
+PROCESSED_TICKETS_FILE = "/Daniele/code/python/Jira-integration/ca_pyt_jira/state/handled_issues.log"
+LAST_RUN_FILE = "/Daniele/code/python/Jira-integration/ca_pyt_jira/state/last_execution.ts"
+
+now = dt.datetime.now()
+
+# Ensure tickets are processed once per day
+if os.path.exists(LAST_RUN_FILE):
+    with open(LAST_RUN_FILE) as f:
+        last_run_time = dt.datetime.strptime(f.read().strip(), "%Y-%m-%d %H:%M:%S")
+
+    if now.time() < last_run_time.time():
+        open(PROCESSED_TICKETS_FILE, "w").close()
+else:
+    open(PROCESSED_TICKETS_FILE, "w").close()
+
+with open(LAST_RUN_FILE, "w") as f:
+    f.write(now.strftime("%Y-%m-%d %H:%M:%S"))
+
+with open(PROCESSED_TICKETS_FILE) as f:
+    processed_tickets = f.read()
+
+# -----------------------------------------------------------------------------
+# Constants & regex patterns
+# -----------------------------------------------------------------------------
+
+EXCHANGE_ID_PATTERN = r"\d+"
+ORDER_ID_PATTERN = r"[a-f0-9]{12}:[a-f0-9]{8}:[a-f0-9]{8}:[a-f0-9]{16}"
+
+# -----------------------------------------------------------------------------
+# Database connection
+# -----------------------------------------------------------------------------
+
+try:
+    db_conn = connector.connect(
+        option_files=["/opt/functional/.config/.mysql_ca_python.cnf"],
+        option_groups=["admin"],
+    )
+    db_cursor = db_conn.cursor()
+except connector.Error as err:
+    logging.exception(err)
+    raise
+
+# Jira credentials
+db_cursor.execute("SELECT value FROM ts_settings.scripts_settings WHERE settings_id=42")
+jira_user = db_cursor.fetchone()[0]
+
+db_cursor.execute("SELECT value FROM ts_settings.scripts_settings WHERE settings_id=43")
+jira_pass = db_cursor.fetchone()[0]
+
+# -----------------------------------------------------------------------------
+# Trading system helpers
+# -----------------------------------------------------------------------------
+
+def get_ts_login(server_name):
+    """Retrieve TS connection details for a given server."""
+    conn = connector.connect(
+        option_files=["/opt/functional/.config/.mysql_ca_python.cnf"],
+        option_groups=["client"],
+    )
+    cur = conn.cursor()
+
+    cur.execute(f"SELECT host FROM ts_settings.trading_systems WHERE server_name='{server_name}'")
+    host = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT attribute_value FROM ts_settings.server_conf "
+        f"WHERE server_name='{server_name}' AND attribute_name='CTRL_PORT'"
+    )
+    port = cur.fetchone()[0]
+
+    cur.execute("SELECT user, password FROM ts_settings.adm_ctrl")
+    credentials = cur.fetchone()
+
+    return host, port, credentials
+
+# Default TS connection
+ts_host, ts_port, ts_credentials = get_ts_login("tradingnode7")
+
+# -----------------------------------------------------------------------------
+# Jira connection
+# -----------------------------------------------------------------------------
+
+jira = JIRA(
+    options={"server": "https://docs.flatex.com/jira"},
+    basic_auth=(jira_user, jira_pass),
+)
+BASE_JQL = (
+    'project = "Recon-Functional Requests" '
+    'AND type IN ("New in only - CA", "Old out, New in - CA") '
+    'AND (due <= "0" OR due IS EMPTY) '
+    'AND ("Due Date/Time" <= "0" OR "Due Date/Time" IS EMPTY) '
+    'AND status IN ('
+        '"Deactivate old PID", '
+        '"CHECK IF MANUAL PID AVAILABLE", '
+        '"DEACTIVATE OLD PID MAN", '
+        '"Update new product", '
+        '"Further Checks"'
+    ') '
+    'AND assignee = "functional@company.com" '
+)
+
+EU_EXCHANGES = (
+    '"Frankfurt", '
+    '"Xetra", '
+    '"London Stock Exchange", '
+    '"Euronext Amsterdam", '
+    '"Borsa Italiana"'
+)
+
+US_EXCHANGES = (
+    '"New York Stock Exchange", '
+    '"NASDAQ"'
+)
+
+APAC_EXCHANGES = (
+    '"Tokyo Stock Exchange", '
+    '"Hong Kong Exchange"'
+)
+
+if now.hour <= 11:
+    JQL = f"{BASE_JQL} AND Exchanges IN ({EU_EXCHANGES}) ORDER BY created, updated, priority DESC"
+elif 11 < now.hour < 15:
+    JQL = f"{BASE_JQL} AND Exchanges IN ({US_EXCHANGES}) ORDER BY created, updated, priority DESC"
+else:
+    JQL = f"{BASE_JQL} AND Exchanges IN ({APAC_EXCHANGES}) ORDER BY created, updated, priority DESC"
+
+tickets = []
+
+for issue in jira.search_issues(JQL):
+    tickets.append(issue.key)
+
+new_tickets = [x for x in tickets if x not in filt_tickets]  # to exclude the ticket already processed today
+
+# Loop for every tickets gathered with JQL query
+for ticket_key in new_tickets:
+    # -----------------------------------------------------------------------------
+    # Processing Jira tickets
+    # -----------------------------------------------------------------------------
+
+    ticket = jira.issue(ticket_key,
+                        fields='customfield_add_info,customfield_classification,customfield_exchange,new_isin,new_pid,status,issuetype')
+
+    try:
+        additional_info = ticket.fields.customfield_add_info
+        if additional_info is None:
+            jira.add_comment(ticket, "Additional information field is missing")
+            continue
+    except TypeError:
+        jira.add_comment(ticket, "Additional information field is missing")
+        continue
+
+    try:
+        exchange_field = ticket.fields.customfield_exchange[0].value
+        if exchange_field is None:
+            jira.add_comment(ticket, "Exchange field is missing")
+            continue
+    except TypeError:
+        jira.add_comment(ticket, "Exchange field is missing")
+        continue
+
+    try:
+        new_pid = ticket.fields.new_pid
+    except TypeError:
+        continue
+
+    try:
+        new_isin = ticket.fields.new_isin
+    except TypeError:
+        jira.add_comment(ticket, "New ISIN is missing")
+        continue
+
+    issue_type = ticket.fields.issuetype
+    status = ticket.fields.status.name
+    classification = normalize_classification(ticket.fields.customfield_classification)
+
+    old_pid = None
+    price = "NULL"
+    skip_update = False
+
+    exchange_number = re.match(EXCHANGE_ID_PATTERN, exchange_field)[0]
+    if exchange_number:
+        db_cursor.execute(f"SELECT exchange_name FROM exchangeinfo WHERE exchange_id={exchange_number}")
+        exchange_name = db_cursor.fetchone()[0]
+    else:
+        continue
+
+    lines = additional_info.splitlines()
+    for line in lines:
+        parts = line.split(',')
+        if len(parts) < 2:
+            skip_update = True
+            break
+
+        if exchange_name in parts[1]:
+            if len(parts) == 3:
+                price = parts[2].strip()
+                price = 0.0001 if price == "0" else price
+                old_pid = parts[0].strip()
+            elif len(parts) == 2:
+                price = None
+                old_pid = parts[0].strip()
+            break
+
+        if len(lines) == 1 and classification in ("exchange change", "spinoff", "merger"):
+            parts[1] = exchange_name
+            lines[0] = ','.join(parts)
+            if len(parts) == 3:
+                price = parts[2].strip()
+                price = 0.0001 if price == "0" else price
+                old_pid = parts[0].strip()
+            elif len(parts) == 2:
+                price = None
+                old_pid = parts[0].strip()
+            break
+
+    if not any(exchange_name in part for part in lines):
+        skip_update = True
+        continue
+
+    if new_pid is None or not str(new_pid).isdigit():
+        try:
+            db_cursor.callproc("ca_fetch_pid", (new_isin, exchange_number))
+            for result in db_cursor.stored_results():
+                fetch_pid = result.fetchone()[0]
+            if fetch_pid is None:
+                fetch_pid = "not available"
+        except NameError:
+            fetch_pid = "not available"
+
+        if isinstance(fetch_pid, int):
+            new_pid = fetch_pid
+        else:
+            skip_update = True
+
+    with open(PROCESSED_TICKETS_FILE, "a") as f:
+        f.write(f"{ticket_key}\n")
+
+    # Skip tickets with missing new product or flagged for exclusion
+    # Skip tickets with missing new product or flagged for exclusion
+    if skip_ticket or "DEGIRO" in exchange_name or "dividend" in classification:
+        continue
+
+    # Determine appropriate stored procedure based on product IDs
+    if old_pid == new_pid:
+        price = "NULL" if price is None else price
+        sp_command = f"call Split_sameISIN({new_pid},{price});"
+
+        if has_open_orders(old_pid) and str(issue_type) == "Old out, New in - CA":
+            jira.add_comment(ticket,
+                             f"The CA can be processed, but open orders exist:\n{open_orders_cmd}\nCheck open orders with:\ncommand pid {old_pid}\nThen run: {sp_command}")
+            continue
+
+        price = None if price == "NULL" else price
+        cur.callproc("Split_sameISIN", (new_pid, price))
+
+    else:
+        price = "NULL" if price is None else price
+        sp_command = f"call updateNewProduct({old_pid},{new_pid},'{classification}',{price});"
+
+        if has_open_orders(old_pid) and str(issue_type) == "Old out, New in - CA":
+            jira.add_comment(ticket,
+                             f"The CA can be processed, but open orders exist:\n{open_orders_cmd}\nCheck open orders with:\ncommand pid {old_pid}\nThen run: {sp_command}")
+            continue
+
+        price = None if price == "NULL" else price
+        cur.callproc("updateNewProduct", (old_pid, new_pid, classification, price))
+
+    # Process stored procedure results and prepare TS commands
+    ts_commands = []
+    case_type = None
+    capture_flag = True
+
+    for result in cur.stored_results():
+        rows = result.fetchall()
+        for row in rows:
+            if capture_flag:
+                if 'WARNING : Old product_id is higher' in row:
+                    capture_flag = False
+                elif 'WARNING :' in row or '[' in row or 'ID(s):' in row:
+                    case_type = 1
+                    break
+                elif '#### Print the following commands in the TS ####' in row or '#### Steps to be done in the TS ####' in row:
+                    capture_flag = False
+            else:
+                case_type = 2
+                ts_commands.append(row[0])
+
+    commands_to_run = "\n".join(ts_commands[:3] if price is None else ts_commands[:5])
+
+    # Post-processing and comments
+    if str(issue_type) == "Old out, New in - CA" and has_open_orders(old_pid):
+        jira.add_comment(ticket,
+                         f"{sp_command}\nExecuted with open orders:\n{open_orders_cmd}\nRun commands:\n{commands_to_run}\nCheck orders with:\ncommand pid {old_pid}")
+    else:
+        if case_type == 1:
+            jira.add_comment(ticket, f"Warning encountered:\n{sp_command}")
+        elif case_type == 2:
+            jira.add_comment(ticket,
+                             f"Stored procedure executed: {sp_command}\nDouble-check details. Commands run:\n{commands_to_run}")
+            servers = ['trading_primary1', 'trading_primary2', 'trading_test1', 'trading_test2', 'trading_proxy1',
+                       'trading_proxy2']
+            servers.append(exchange_server[int(exchange_num)])
+
+            for server in servers:
+                host, port, creds = get_ts_login(server)
+                for cmd in commands_to_run.splitlines():
+                    if cmd.startswith("command"):
+                        ac.ac_command(host, port, creds[0], creds[1], cmd)
+
+            # Transition Jira issues based on type and status
+            if str(issue_type) == "Old out, New in - CA" and status.lower() == "further checks":
+                jira.transition_issue(ticket, 62)
+                jira.transition_issue(ticket, 34)
+            elif str(issue_type) == "Old out, New in - CA" and status.lower() == "update new product":
+                jira.transition_issue(ticket, 34)
+            elif str(issue_type) == "New in only - CA" and status.lower() == "further checks":
+                jira.transition_issue(ticket, 34)
+                jira.transition_issue(ticket, 22)
+            elif str(issue_type) == "New in only - CA" and status.lower() == "update new product":
+                jira.transition_issue(ticket, 22)
+
+# Commit changes and close connections
+try:
+    db_conn.commit()
+except connector.Error as e:
+    print(f"Database commit failed: {e}")
+
+cur.close()
+db_conn.close()
