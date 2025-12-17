@@ -1,0 +1,59 @@
+DATA ANALYSIS
+
+1. Data Cleaning
+•	When the first two numbers of Created Date/Time are ≤12, the day and month appear switched.
+•	If the Processed Date/Time completes on the next day, the FTD date is recorded as the next day.
+
+2. Deposit Frequency Distribution
+•	The bar chart shows the count of clients by number of deposits.
+•	Most clients make 1 deposit, with the number of clients decreasing as the number of deposits increases.
+•	Bonus usage decreases as the number of deposits increases:
+o	1 deposit → 57.96% bonus
+o	2 deposits → 43.68% bonus
+o	3 deposits → 39.73% bonus
+o	4 deposits → 39.26% bonus
+o	5+ deposits → 36.84% bonus
+
+3. Cohort Analysis
+•	Cohort analysis shows retention over months 0–5.
+•	Retention is highest in the first month (period 0) and gradually declines over subsequent periods.
+•	Monthly retention patterns vary by cohort; February and April cohorts have the largest initial deposit percentages.
+
+4. Deposit Amount Over Time
+•	The bar chart shows sum of deposits by date.
+•	Deposits are relatively stable across the months, with occasional spikes, including a notable peak in April.
+•	Bonus-related deposits are smaller on average, with occasional outliers.
+
+5. Brand Distribution
+•	Brand distribution is nearly balanced between the brands.
+•	No major skew is observed, suggesting consistent client behaviour across brands.
+
+6. Bonus-Related Deposits
+•	In the first quarter, bonus deposits spike on Fridays, possibly due to promotions or campaigns.
+•	Bonus deposits are more frequent during weekends (including Fridays) in the second quarter.
+
+7. Dashboard Interaction
+•	A reset button is available in the top-right corner to clear all filters and return to the default view.
+
+
+PROPOSAL
+
+Proposal 1 — Increase Second Deposit Conversion (Main Recommendation)
+Data shows a sharp drop after the first deposit and a large decline in bonus usage from deposit 1 → 2.
+Because the second deposit is the strongest indicator of long-term engagement, focusing here gives the highest return.
+Suggested actions:
+•	Targeted “Second Deposit Booster”: personalized bonus or cashback that activates only after the first deposit is completed.
+•	Timed offer: send within 24–48 hours after FTD (based on the observed next-day processing pattern).
+•	Weekend reinforcement: since bonuses are already more common on weekends, introduce a weekend-specific second deposit perk.
+•	A/B testing: vary incentive size for users with small FTDs (since bonus users tend to deposit less).
+•	Expected impact: higher conversion to deposit #2 → improved retention in months 1–2 → higher lifetime value.
+
+
+Proposal 2 — Optimize Bonus Allocation for Profitability
+You observed that bonus-related deposits are smaller, weekend-heavy, and show promo-driven spikes.
+This means bonuses may not be economically efficient in their current form.
+Suggested actions:
+•	Reduce blanket weekend bonuses and replace them with tiered bonuses that reward higher activity.
+•	Shift budget toward first-to-second-deposit incentives, where ROI is higher.
+•	Introduce “smart bonuses” that scale with user behavior (deposit size, frequency, time of day).
+•	Cap low-value bonus chasers with soft rules (e.g., minimum wagering or minimum deposit).
