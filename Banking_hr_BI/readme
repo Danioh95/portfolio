@@ -1,0 +1,64 @@
+**Task overview**
+
+The purpose of this exercise is to explore common people analytics variables, visualize them, and analyze their interdependencies to draw meaningful conclusions.
+The dataset contains 18 core people analytics variables. It represents a fictitious workforce similar in size and scope to that of a large organization. All data is entirely synthetic and created solely for this exercise.
+
+**Dataset variables**
+
+* Employee ID: 4-digit unique identifier
+* Gender
+* Age
+* Department
+* Job Role
+* Date of Joining
+* Salary
+* Performance Rating: scale from 1 to 5 (5 = highest)
+* Absenteeism Rate: value between 0 and 1, representing absence share of total working time
+* Engagement Score: scale from 1 to 5 (5 = highest)
+* Education Level: High School, Bachelor’s, Master’s, PhD
+* Years in Current Role
+* Years at Company
+* Promotion in Last 2 Years: Yes / No
+* Overtime Hours per Week
+* Training Hours per Year
+* Office Location
+* Bonus Received in Last Year: Yes / No
+
+---
+
+### **Analytical questions**
+
+**1. Relationship between engagement, performance, and salary**
+
+The organization aims to analyze the interdependencies between engagement, performance, and salary.
+
+* What is the correlation between performance and engagement in the sample data?
+* What is the relationship between performance and salary?
+* What is the relationship between engagement and salary?
+
+*Please summarize your findings in no more than 100 words.*
+
+**Answer:**
+The analysis shows a strong positive relationship between engagement, performance, and salary. Employees with higher engagement levels tend to demonstrate stronger performance, suggesting that motivation supports better outcomes. Both engagement and performance are positively associated with higher salaries, indicating that the organization rewards sustained contribution and high achievement.
+
+---
+
+**2. Absenteeism and performance**
+
+The organization seeks to reduce absenteeism and understand its connection with performance.
+
+* What trends in absenteeism rate can be observed across different performance levels?
+
+---
+
+**3. Gender pay comparison among top performers**
+
+The organization is committed to equitable pay for equal work and operates a structured performance management system. A key objective is to minimize salary differences between women and men among top performers (defined as employees with a performance rating of 5).
+
+* Can you rank the five job roles in which women with a performance rating of 5, on average, earn the least compared to their male counterparts?
+
+---
+
+### **Visualization task**
+
+Please create a Power BI dashboard using the provided .csv file, including **4–5 visualizations**. You may choose the visuals that best highlight relevant trends and insights from the data.
