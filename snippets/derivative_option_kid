@@ -1,0 +1,181 @@
+
+CREATE DEFINER=`hiq_routines`@`localhost` PROCEDURE `derivative_option_kid`(IN start_product_id INT)
+MODIFIES SQL DATA
+COMMENT = 'Update derivative options KID documents based on product and settings, applying latest changes and syncing bitmask with trading system';
+BEGIN
+
+    DECLARE max_row INT DEFAULT 0;
+    DECLARE min_row INT DEFAULT 1;
+    DECLARE _product_id, _bit_mask, _gcb_mask, _contract_type, _underlying_contract_type INT DEFAULT NULL;
+    DECLARE _product_id_var VARCHAR(11);
+    DECLARE _setting_modified_cutoff DATE;
+    DECLARE _setting_updated DATE;
+
+    IF start_product_id = 1 THEN 
+        SET start_product_id = (
+            SELECT product_id 
+            FROM import_helper.product_document_product_last_update 
+            WHERE priip_stored_procedure = 'derivative_option_kid'
+        ); 
+    END IF;
+
+    DROP TEMPORARY TABLE IF EXISTS tmp_derivative_product;
+    DROP TEMPORARY TABLE IF EXISTS tmp_derivative_settings;
+    DROP TEMPORARY TABLE IF EXISTS tmp_derivative_settings_bits;
+
+    CREATE TEMPORARY TABLE tmp_derivative_product (
+        row_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        derivative_gcb INT NOT NULL,
+        product_id INT NOT NULL DEFAULT 0,
+        product_id_var VARCHAR(11),
+        exchange_id INT NOT NULL,
+        contract_type INT NOT NULL,
+        underlying_contract_type INT NOT NULL,
+        underlying_contract_id INT NOT NULL,
+        put_call INT DEFAULT NULL,
+        gcb_mask INT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+
+    INSERT INTO tmp_derivative_product
+    SELECT
+        NULL,
+        d.giro_class_bitmask,
+        p.product_id,
+        p.product_id,
+        d.exchange_id,
+        d.contract_type,
+        d.underlying_contract_type,
+        p.underlying_contract_id,
+        p.put_call,
+        p.giro_class_bitmask
+    FROM hiqtrading_p.product p
+    JOIN hiqtrading_p.derivativeinfo d ON p.derivativeinfo_id = d.id
+    WHERE p.product_id > start_product_id
+      AND p.contract_type = 8
+      AND d.exchange_id IN (102,105,200,205,256,301,357)
+      AND d.underlying_contract_type IS NOT NULL
+      AND p.activity_flag = 1
+      AND p.giro_class_bitmask & 24
+      AND p.expiration_date >= CURDATE()
+      AND p.order_route != 'NONE';
+
+    CREATE TEMPORARY TABLE tmp_derivative_settings AS
+    SELECT
+        s.id,
+        s.exchange_id,
+        s.contract_type,
+        s.underlying_contract_type,
+        s.put_call,
+        s.cash_settled,
+        s.product_id_type,
+        s.type,
+        s.subtype,
+        s.mimetype,
+        s.source,
+        g.bit AS bit_mask,
+        s.culture,
+        s.country_code,
+        s.url_scheme,
+        DATE(s.stamp_modified) AS stamp_modified
+    FROM import_helper.product_document_settings s
+    JOIN import_helper.product_giroclassbitmask g 
+        ON g.country_code = s.culture
+    JOIN import_helper.product_kid_regulator_language r 
+        ON g.country_code = r.regulator_country
+    WHERE s.exchange_id IN (102,105,200,205,256,301,357)
+      AND s.product_id_type='PRODUCT_ID'
+      AND s.type='KID'
+      AND s.contract_group IS NOT NULL AND s.contract_group != '0'
+      AND s.is_active = 1
+      AND s.contract_type = 8;
+
+    ALTER TABLE tmp_derivative_settings ADD INDEX idx_exchange_id (exchange_id);
+
+    CREATE TEMPORARY TABLE tmp_derivative_settings_bits AS
+    SELECT
+        exchange_id,
+        contract_type,
+        underlying_contract_type,
+        product_id_type,
+        subtype,
+        culture,
+        country_code,
+        url_scheme,
+        source,
+        MAX(stamp_modified) AS stamp_modified,
+        BIT_OR(bit_mask) AS bit_mask
+    FROM tmp_derivative_settings
+    GROUP BY exchange_id, contract_type, underlying_contract_type, product_id_type, subtype, culture;
+
+    ALTER TABLE tmp_derivative_settings_bits ADD INDEX idx_exchange_id (exchange_id);
+
+    SET _setting_modified_cutoff = CURDATE() - INTERVAL 7 DAY;
+    SET max_row = (SELECT MAX(row_id) FROM tmp_derivative_product);
+
+    WHILE min_row <= max_row DO
+
+        SELECT 
+            p.contract_type,
+            p.product_id,
+            p.product_id_var,
+            BIT_OR(s.bit_mask) & p.derivative_gcb,
+            p.gcb_mask & ~30,
+            MAX(s.stamp_modified)
+        INTO
+            _contract_type, _product_id, _product_id_var, _bit_mask, _gcb_mask, _setting_updated
+        FROM tmp_derivative_product p
+        JOIN tmp_derivative_settings_bits s
+            ON p.exchange_id = s.exchange_id
+            AND p.contract_type = s.contract_type
+            AND p.underlying_contract_type = s.underlying_contract_type
+        WHERE p.row_id = min_row;
+
+        IF _contract_type = 8 THEN
+            IF _bit_mask <> _gcb_mask OR _setting_updated >= _setting_modified_cutoff THEN
+
+                IF EXISTS(SELECT 1 FROM hiqtradingweb_p.product_document WHERE product_id = _product_id_var) THEN
+                    DELETE FROM hiqtradingweb_p.product_document WHERE product_id = _product_id_var;
+                END IF;
+
+                INSERT INTO hiqtradingweb_p.product_document (
+                    product_id, product_id_type, type, subtype, setting_id, url, mimetype, date, culture, product_type, source
+                )
+                SELECT
+                    p.product_id,
+                    s.product_id_type,
+                    s.type,
+                    s.subtype,
+                    s.id AS setting_id,
+                    s.url_scheme AS url,
+                    s.mimetype,
+                    CURDATE() AS date,
+                    s.culture,
+                    s.contract_type AS product_type,
+                    s.source
+                FROM tmp_derivative_product p
+                JOIN tmp_derivative_settings_bits s
+                    ON p.exchange_id = s.exchange_id
+                    AND s.contract_type = p.contract_type
+                    AND s.underlying_contract_type = p.underlying_contract_type
+                    AND s.put_call = p.put_call
+                WHERE p.row_id = min_row;
+
+                UPDATE hiqtrading_p.product
+                SET giro_class_bitmask = (_gcb_mask | _bit_mask)
+                WHERE product_id = _product_id;
+
+            END IF;
+        END IF;
+
+        SELECT SLEEP(0.001);
+        SET min_row = min_row + 1;
+
+    END WHILE;
+
+    IF _product_id IS NOT NULL THEN
+        UPDATE import_helper.product_document_product_last_update
+        SET product_id = _product_id
+        WHERE priip_stored_procedure = 'derivative_option_kid';
+    END IF;
+
+END;
